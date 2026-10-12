@@ -33,9 +33,9 @@ about or settings screen.
 | macOS | `~/Library/Application Support/<app>/` |
 | Windows | `%APPDATA%\<app>\` (Roaming) |
 
-`<app>` is the app's lowercase id (`photocraft`, `designcraft`, …), so existing Linux folder
-names do not change. Whether macOS should use bundle ids (`ai.storyteller.artcraft-launcher`)
-instead is still open in #12.
+`<app>` is the app's lowercase id (`photocraft`, `designcraft`, …) on every platform, macOS
+included (decided in #12). Existing Linux folder names do not change; the Launcher moves from
+`ai.storyteller.artcraft-launcher` to `artcraft-launcher`.
 
 If the folder cannot be created or written (a portable marker in `/Applications`, an AppImage
 mount), the store opens read-only and says so at startup.
