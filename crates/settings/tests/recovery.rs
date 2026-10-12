@@ -159,3 +159,22 @@ fn failed_migration_in_an_unwritable_folder_shows_defaults() {
     assert_eq!(store.get().general.language, "en", "defaults, not half-migrated values");
     assert_eq!(report.source, Source::Defaults);
 }
+
+// --- Review on #22 (skylartaylor): an outside file whose migration fails must not be overwritten. ---
+
+#[test]
+fn outside_file_with_failing_migration_is_not_overwritten() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut store, _) = open_in(tmp.path());
+    store.flush().unwrap();
+    // Another writer leaves a file at a version this build cannot migrate (0 has no step).
+    let external = "schema_version = 0\n[general]\nlanguage = 'external'\n";
+    write_config(tmp.path(), external);
+
+    store.update(|p| p.general.language = "local".into());
+    let result = store.flush();
+    assert!(matches!(result, Err(SettingsError::ReadOnly(_))), "{result:?}");
+    assert!(store.is_read_only());
+    assert_eq!(read_config(tmp.path()), external, "the outside file is left untouched");
+    assert!(matches!(store.tick(std::time::Instant::now()).status, craft_settings::SaveStatus::Idle), "no retries once read-only");
+}

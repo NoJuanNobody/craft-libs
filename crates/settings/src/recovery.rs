@@ -37,9 +37,26 @@ pub fn backup_path(path: &Path) -> PathBuf {
 /// Writes `text`, the last version that parsed, to the backup file atomically.
 ///
 /// The caller decides what is safe to keep: a blank or unparsable file must never replace the
-/// previous backup.
+/// previous backup. On Unix the backup always gets the same mode as `path` (`0600` when there is
+/// none), so it is never readable by more people than the settings themselves.
 pub fn write_backup(path: &Path, text: &str) -> io::Result<()> {
-    craft_atomic::atomic_write(&backup_path(path), text.as_bytes())
+    let backup = backup_path(path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
+        // An atomic replace keeps the existing file's mode, so narrow an old, broader backup
+        // before new contents go into it, then match the config once written.
+        if backup.exists() {
+            std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(mode))?;
+        }
+        craft_atomic::atomic_write(&backup, text.as_bytes())?;
+        std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(mode))
+    }
+    #[cfg(not(unix))]
+    {
+        craft_atomic::atomic_write(&backup, text.as_bytes())
+    }
 }
 
 /// Checks that `dir` accepts a new file by creating and removing a probe.

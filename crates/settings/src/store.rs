@@ -374,7 +374,8 @@ impl<T: Settings> SettingsStore<T> {
     /// edit changed the file since this store last read or wrote it, the new document is adopted
     /// so its comments and unknown keys survive, and this store's values then win on known keys.
     /// A file that no longer parses is moved aside (the edit is kept, the previous backup stays),
-    /// and a file from a newer build makes the store read-only instead of overwriting it.
+    /// and a file from a newer build, or one whose migration fails, makes the store read-only
+    /// instead of overwriting it, the same as at startup.
     fn check_disk(&mut self, path: &Path) -> Result<Option<String>, SettingsError> {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
@@ -393,8 +394,12 @@ impl<T: Settings> SettingsStore<T> {
                     return Err(SettingsError::ReadOnly(why));
                 }
                 Ok(_) => self.doc = doc,
-                // Keep this store's document; the outside text is still backed up below.
-                Err(_) => {}
+                // Same as at startup: leave the outside file untouched and stop saving.
+                Err(e) => {
+                    let why = ReadOnlyReason::Migration(e).to_string();
+                    self.read_only = Some(why.clone());
+                    return Err(SettingsError::ReadOnly(why));
+                }
             }
         }
         Ok((!text.trim().is_empty()).then_some(text))

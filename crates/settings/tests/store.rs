@@ -228,3 +228,57 @@ fn outside_edit_with_the_same_mtime_is_still_seen() {
     assert!(text.contains("# same second"), "{text}");
     assert!(text.contains("language = \"fr\""), "{text}");
 }
+
+// --- Review on #22 (skylartaylor): the backup must never be more readable than config.toml. ---
+
+#[cfg(unix)]
+fn mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[cfg(unix)]
+#[test]
+fn new_backup_is_as_private_as_the_config() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (mut store, _) = open_in(tmp.path());
+    store.flush().unwrap();
+    store.update(|p| p.general.language = "private".into());
+    store.flush().unwrap();
+    assert_eq!(mode(&config_path(tmp.path())), 0o600);
+    assert_eq!(mode(&tmp.path().join("config.toml.bak")), 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_broader_backup_is_tightened() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (mut store, _) = open_in(tmp.path());
+    store.flush().unwrap();
+    // A backup left behind by an older build, readable by everyone.
+    let bak = tmp.path().join("config.toml.bak");
+    std::fs::write(&bak, b"old backup").unwrap();
+    std::fs::set_permissions(&bak, std::fs::Permissions::from_mode(0o664)).unwrap();
+
+    store.update(|p| p.general.language = "private".into());
+    store.flush().unwrap();
+    assert_eq!(mode(&bak), mode(&config_path(tmp.path())), "backup must not be more readable than config.toml");
+    assert_eq!(mode(&bak), 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn backup_follows_a_mode_the_user_chose_for_the_config() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut store, _) = open_in(tmp.path());
+    store.flush().unwrap();
+    std::fs::set_permissions(config_path(tmp.path()), std::fs::Permissions::from_mode(0o640)).unwrap();
+    store.update(|p| p.general.language = "fr".into());
+    store.flush().unwrap();
+    assert_eq!(mode(&tmp.path().join("config.toml.bak")), 0o640);
+}

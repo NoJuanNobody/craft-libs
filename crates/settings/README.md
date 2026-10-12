@@ -125,7 +125,8 @@ things that do not belong in `config.toml`.
 - `config.toml`: the settings, starting with `schema_version = N`. Written on the first
   `flush()` even when nothing changed, so users can find it. Created `0600` on Unix; a mode the
   user changes by hand is kept on later saves.
-- `config.toml.bak`: the previous version, refreshed before each save.
+- `config.toml.bak`: the previous version, refreshed before each save. On Unix it always has
+  the same mode as `config.toml`; an older, broader backup is tightened on the next save.
 - `config.broken-<unix-ts>.toml`: a file that was not valid TOML, moved aside. Never deleted.
 
 ## What happens when loading
@@ -154,7 +155,7 @@ which can stay the same on FAT, HFS+ or network shares) with what it last read o
 | Changed, parses | Adopts it so its comments and unknown keys survive, backs it up, then writes this store's values over its known keys. |
 | Changed, does not parse | Moves it to `config.broken-<ts>.toml` (the edit is kept; `take_moved_aside()` returns the path to show), leaves the previous backup alone, then writes. |
 | Blank | Leaves the previous backup alone, then writes. |
-| From a newer build | Writes nothing; the store becomes read-only and the save returns `SettingsError::ReadOnly`. |
+| From a newer build, or its migration fails | Writes nothing; the store becomes read-only and the save returns `SettingsError::ReadOnly`, the same as at startup. |
 
 ### Concurrency contract
 
