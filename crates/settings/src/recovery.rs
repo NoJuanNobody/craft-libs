@@ -34,13 +34,12 @@ pub fn backup_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// Copies the current file to its backup, atomically. Nothing happens when there is no file.
-pub fn refresh_backup(path: &Path) -> io::Result<()> {
-    match std::fs::read(path) {
-        Ok(bytes) => craft_atomic::atomic_write(&backup_path(path), &bytes),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+/// Writes `text`, the last version that parsed, to the backup file atomically.
+///
+/// The caller decides what is safe to keep: a blank or unparsable file must never replace the
+/// previous backup.
+pub fn write_backup(path: &Path, text: &str) -> io::Result<()> {
+    craft_atomic::atomic_write(&backup_path(path), text.as_bytes())
 }
 
 /// Checks that `dir` accepts a new file by creating and removing a probe.

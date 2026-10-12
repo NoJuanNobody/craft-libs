@@ -86,3 +86,76 @@ fn damaged_file_that_cannot_be_moved_is_left_alone() {
     assert!(matches!(store.flush(), Err(SettingsError::ReadOnly(_))));
     assert_eq!(read_config(dir), "not = [toml");
 }
+
+// --- Review on #22: the backup must never be replaced by a damaged or emptied file. ---
+
+#[test]
+fn file_damaged_while_running_is_moved_aside_and_backup_kept() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut store, _) = open_in(tmp.path());
+    store.update(|p| p.general.language = "fr".into());
+    store.flush().unwrap();
+    store.update(|p| p.general.language = "es".into());
+    store.flush().unwrap();
+    let good_backup = std::fs::read_to_string(tmp.path().join("config.toml.bak")).unwrap();
+    assert!(good_backup.contains("language = \"fr\""));
+
+    // A hand edit with a typo while the app is running.
+    write_config(tmp.path(), "schema_version = 2\n[general\nlanguage = \"it\"\n");
+    store.update(|p| p.general.language = "pt".into());
+    store.flush().unwrap();
+
+    assert_eq!(std::fs::read_to_string(tmp.path().join("config.toml.bak")).unwrap(), good_backup, "backup untouched");
+    let moved = store.take_moved_aside();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(std::fs::read_to_string(&moved[0]).unwrap(), "schema_version = 2\n[general\nlanguage = \"it\"\n", "the user's edit is kept");
+    assert!(read_config(tmp.path()).contains("language = \"pt\""));
+    assert!(store.take_moved_aside().is_empty(), "drained");
+}
+
+#[test]
+fn emptied_file_does_not_replace_the_backup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut store, _) = open_in(tmp.path());
+    store.update(|p| p.general.language = "fr".into());
+    store.flush().unwrap();
+    store.update(|p| p.general.language = "es".into());
+    store.flush().unwrap();
+    let good_backup = std::fs::read_to_string(tmp.path().join("config.toml.bak")).unwrap();
+
+    write_config(tmp.path(), "");
+    store.update(|p| p.general.language = "pt".into());
+    store.flush().unwrap();
+    assert_eq!(std::fs::read_to_string(tmp.path().join("config.toml.bak")).unwrap(), good_backup);
+    assert!(read_config(tmp.path()).contains("language = \"pt\""));
+}
+
+#[test]
+fn newer_build_writing_while_running_is_not_overwritten() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (mut store, _) = open_in(tmp.path());
+    store.flush().unwrap();
+    let newer = "schema_version = 9\n[general]\nlanguage = \"de\"\n";
+    write_config(tmp.path(), newer);
+    store.update(|p| p.general.language = "fr".into());
+    assert!(matches!(store.flush(), Err(SettingsError::ReadOnly(_))));
+    assert!(store.is_read_only());
+    assert_eq!(read_config(tmp.path()), newer);
+}
+
+// --- Review on #22: a failed migration must not leave half-migrated values in memory. ---
+
+#[cfg(unix)]
+#[test]
+fn failed_migration_in_an_unwritable_folder_shows_defaults() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    // Version 0 has no migration step, so upgrading fails.
+    write_config(tmp.path(), "schema_version = 0\n[general]\nlanguage = \"de\"\n");
+    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let (store, report) = open_in(tmp.path());
+    std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(report.read_only, Some(ReadOnlyReason::DirNotWritable(_))), "{report:?}");
+    assert_eq!(store.get().general.language, "en", "defaults, not half-migrated values");
+    assert_eq!(report.source, Source::Defaults);
+}

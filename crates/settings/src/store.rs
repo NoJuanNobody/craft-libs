@@ -2,7 +2,7 @@
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use toml_edit::DocumentMut;
 
@@ -84,7 +84,11 @@ pub struct SettingsStore<T: Settings> {
     debounce: Duration,
     failures: u32,
     retry_at: Option<Instant>,
-    seen_mtime: Option<SystemTime>,
+    /// The file's contents as last read or written. Compared by content, not mtime, so an edit
+    /// within the same second (coarse timestamps on FAT, HFS+, network shares) is still seen.
+    seen_text: Option<String>,
+    /// Files that were damaged on disk at save time and moved aside; see [`SettingsStore::take_moved_aside`].
+    moved_aside: Vec<PathBuf>,
 }
 
 impl<T: Settings> std::fmt::Debug for SettingsStore<T> {
@@ -134,7 +138,8 @@ impl<T: Settings> SettingsStore<T> {
             debounce: options.debounce,
             failures: 0,
             retry_at: None,
-            seen_mtime: None,
+            seen_text: None,
+            moved_aside: Vec::new(),
         };
 
         let (Some(dir), Some(path)) = (store.dir.clone(), store.path.clone()) else {
@@ -188,6 +193,13 @@ impl<T: Settings> SettingsStore<T> {
     /// True when the store will not write the file; the load report says why.
     pub fn is_read_only(&self) -> bool {
         self.read_only.is_some()
+    }
+
+    /// Damaged `config.toml` files found and moved aside while saving (someone broke the file
+    /// while the app was running). Drains the list; show these to the user like
+    /// [`LoadReport::broken_moved_to`].
+    pub fn take_moved_aside(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.moved_aside)
     }
 
     /// True when changes are waiting to be saved.
@@ -282,13 +294,17 @@ impl<T: Settings> SettingsStore<T> {
             && let Ok(text) = std::fs::read_to_string(path)
             && let Ok(mut doc) = document::parse(&text)
         {
-            let upgraded = migrate::upgrade::<T>(&mut doc);
+            // A failed migration leaves the document half-upgraded; show defaults instead.
+            let Ok(upgraded) = migrate::upgrade::<T>(&mut doc) else {
+                return;
+            };
             let (value, errors) = document::deserialize_sections::<T>(&doc);
             self.value = value;
             self.doc = doc;
+            self.seen_text = Some(text);
             report.source = Source::File;
             report.section_errors = errors;
-            if let Ok(Upgrade::Migrated { from }) = upgraded {
+            if let Upgrade::Migrated { from } = upgraded {
                 report.migrated_from = Some(from);
             }
         }
@@ -320,7 +336,7 @@ impl<T: Settings> SettingsStore<T> {
         let (value, errors) = document::deserialize_sections::<T>(&doc);
         self.value = value;
         self.doc = doc;
-        self.seen_mtime = mtime(path);
+        self.seen_text = Some(text.to_owned());
         report.source = Source::File;
         report.section_errors = errors;
     }
@@ -333,8 +349,9 @@ impl<T: Settings> SettingsStore<T> {
             self.dirty = false;
             return Ok(());
         };
-        self.reload_if_changed_outside(&path);
-        recovery::refresh_backup(&path)?;
+        if let Some(on_disk) = self.check_disk(&path)? {
+            recovery::write_backup(&path, &on_disk)?;
+        }
         merge_into(&mut self.doc, &self.value).map_err(|e| SettingsError::Serialize(e.to_string()))?;
         set_schema_version(&mut self.doc, T::SCHEMA_VERSION);
         let text = document::render(&self.doc);
@@ -342,7 +359,7 @@ impl<T: Settings> SettingsStore<T> {
             restrict_permissions(file)?;
             file.write_all(text.as_bytes())
         })?;
-        self.seen_mtime = mtime(&path);
+        self.seen_text = Some(text);
         self.dirty = false;
         self.written = true;
         self.failures = 0;
@@ -350,25 +367,38 @@ impl<T: Settings> SettingsStore<T> {
         Ok(())
     }
 
-    /// Another instance or a hand edit may have changed the file since it was read. Re-read it
-    /// so their comments and unknown keys survive; known keys are then overwritten by this
-    /// store's values.
-    fn reload_if_changed_outside(&mut self, path: &Path) {
-        let current = mtime(path);
-        if current.is_none() || current == self.seen_mtime {
-            return;
+    /// Looks at the file on disk just before a save, and returns its text when it is a good
+    /// backup (it parses and is not blank).
+    ///
+    /// The contract is best effort, not multi-process locking: if another instance or a hand
+    /// edit changed the file since this store last read or wrote it, the new document is adopted
+    /// so its comments and unknown keys survive, and this store's values then win on known keys.
+    /// A file that no longer parses is moved aside (the edit is kept, the previous backup stays),
+    /// and a file from a newer build makes the store read-only instead of overwriting it.
+    fn check_disk(&mut self, path: &Path) -> Result<Option<String>, SettingsError> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let Ok(mut doc) = document::parse(&text) else {
+            self.moved_aside.push(recovery::move_aside(path)?);
+            return Ok(None);
+        };
+        if self.seen_text.as_deref() != Some(text.as_str()) {
+            match migrate::upgrade::<T>(&mut doc) {
+                Ok(Upgrade::Newer { file }) => {
+                    let why = ReadOnlyReason::NewerSchema { file, app: T::SCHEMA_VERSION }.to_string();
+                    self.read_only = Some(why.clone());
+                    return Err(SettingsError::ReadOnly(why));
+                }
+                Ok(_) => self.doc = doc,
+                // Keep this store's document; the outside text is still backed up below.
+                Err(_) => {}
+            }
         }
-        if let Ok(text) = std::fs::read_to_string(path)
-            && let Ok(mut doc) = document::parse(&text)
-            && !matches!(migrate::upgrade::<T>(&mut doc), Ok(Upgrade::Newer { .. }) | Err(_))
-        {
-            self.doc = doc;
-        }
+        Ok((!text.trim().is_empty()).then_some(text))
     }
-}
-
-fn mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// Exponential backoff: 1 s, 2 s, 4 s, … capped at [`MAX_RETRY_DELAY`].

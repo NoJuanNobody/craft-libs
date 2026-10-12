@@ -143,9 +143,27 @@ things that do not belong in `config.toml`.
 
 Values are merged into the document that was loaded: tables merge key by key, arrays and
 scalars are replaced whole, comments, key order, unknown keys and each replaced line's trailing
-comment stay. If the file changed on disk since it was read (another instance, a hand edit), it is
-re-read first so those comments and unknown keys survive; known keys are then last-writer-wins.
-Each write goes through `craft-atomic`, so a failed save leaves the old file intact.
+comment stay. Each write goes through `craft-atomic`, so a failed save leaves the old file intact.
+
+Just before each write the store reads the file and compares its **contents** (not its mtime,
+which can stay the same on FAT, HFS+ or network shares) with what it last read or wrote:
+
+| File on disk | What the save does |
+|---|---|
+| Unchanged | Backs it up to `config.toml.bak`, then writes. |
+| Changed, parses | Adopts it so its comments and unknown keys survive, backs it up, then writes this store's values over its known keys. |
+| Changed, does not parse | Moves it to `config.broken-<ts>.toml` (the edit is kept; `take_moved_aside()` returns the path to show), leaves the previous backup alone, then writes. |
+| Blank | Leaves the previous backup alone, then writes. |
+| From a newer build | Writes nothing; the store becomes read-only and the save returns `SettingsError::ReadOnly`. |
+
+### Concurrency contract
+
+Saving is **best effort, last writer wins**, not multi-process locking. Hand edits and a
+second instance's unknown keys and comments are preserved as above, but two processes saving
+within the same moment can still race: the later write wins on known keys. Settings are small
+and change rarely, so this is the contract apps should assume. An app that needs strict
+coordination between processes (for example a launcher writing another app's settings) should
+add its own lock around `flush()`.
 
 ## Validation
 
