@@ -88,21 +88,34 @@ let _ = store.flush();
 ```
 
 `SettingsStore::open_at(dir)` opens a store in a given folder, for settings that travel with a
-library or project. `OpenOptions` adds older files to import, a different debounce, and a `Probe`
-for tests.
+library or project. `SettingsStore::open(Location::Memory)` keeps settings in memory only and
+reads and writes nothing, for tests, demos and switches like `DESIGNCRAFT_NO_PREFS`; the app
+uses the same `get`/`update`/`tick`/`flush` calls either way. `OpenOptions` adds older files to
+import, a different debounce, and a `Probe` for tests.
 
 ## Where the file goes
 
 `Location::Auto` applies these rules in order; the report says which one won:
 
 1. `Location::Dir(path)`: an application override, such as a `--config-dir` flag.
-2. `<APP>_CONFIG_DIR` (`PHOTOCRAFT_CONFIG_DIR`); empty counts as unset.
-3. A file named `portable` next to the executable (next to the `.app` bundle on macOS): settings
-   go in `config/` beside it.
+2. `<APP>_CONFIG_DIR` (`PHOTOCRAFT_CONFIG_DIR`). Set but **empty** means isolated: the store
+   is in memory only and nothing is read or written, so tests and agents never touch the real
+   profile.
+3. A portable marker next to the executable (next to the `.app` bundle on macOS): by default a
+   file named `portable`, with settings in `config/` beside it. An app with an existing portable
+   layout keeps it by overriding `Settings::PORTABLE_MARKERS` and `Settings::PORTABLE_DIR`:
+
+   ```rust,ignore
+   const PORTABLE_MARKERS: &'static [&'static str] = &["portable.txt", "PhotoCraft.portable"];
+   const PORTABLE_DIR: &'static str = "PhotoCraftData";
+   ```
 4. The platform config folder: `$XDG_CONFIG_HOME/<app>/` or `~/.config/<app>/` on Linux,
    `~/Library/Application Support/<app>/` on macOS, `%APPDATA%\<app>\` on Windows.
 
-The folder is created at open. If it cannot be created or written, the store opens read-only
+With no folder (isolated or `Location::Memory`), `store.dir()` and `store.path()` are `None`,
+`is_persistent()` is false, legacy files are not imported, and `flush()` returns `Ok`.
+
+Otherwise the folder is created at open. If it cannot be created or written, the store opens read-only
 and the report says so, so the application can tell the user at startup rather than on the
 first save. `paths::cache_dir` and `paths::data_dir` give the matching cache and data folders for
 things that do not belong in `config.toml`.

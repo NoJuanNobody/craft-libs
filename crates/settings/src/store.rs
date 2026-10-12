@@ -10,7 +10,7 @@ use crate::Settings;
 use crate::document::{self, merge_into, set_schema_version};
 use crate::error::{LoadReport, ReadOnlyReason, SaveStatus, SettingsError, Source, TickResult};
 use crate::migrate::{self, LegacyFile, Upgrade};
-use crate::paths::{self, Location, Probe};
+use crate::paths::{self, Location, Portable, Probe};
 use crate::recovery;
 
 /// The settings file name.
@@ -69,9 +69,12 @@ impl<T> OpenOptions<T> {
 }
 
 /// An application's settings, with the file they came from.
+///
+/// With no folder (an empty `<APP>_CONFIG_DIR`, or [`Location::Memory`]) the store keeps
+/// everything in memory: `get`/`update` work as usual, nothing is read or written.
 pub struct SettingsStore<T: Settings> {
-    dir: PathBuf,
-    path: PathBuf,
+    dir: Option<PathBuf>,
+    path: Option<PathBuf>,
     doc: DocumentMut,
     value: T,
     read_only: Option<String>,
@@ -107,8 +110,9 @@ impl<T: Settings> SettingsStore<T> {
 
     /// Opens the store with full options.
     pub fn open_with(options: OpenOptions<T>) -> (Self, LoadReport) {
-        let resolved = paths::resolve(T::APP_ID, &options.location, &options.probe);
-        let path = resolved.dir.join(CONFIG_FILE);
+        let portable = Portable { markers: T::PORTABLE_MARKERS, dir: T::PORTABLE_DIR };
+        let resolved = paths::resolve(T::APP_ID, &portable, &options.location, &options.probe);
+        let path = resolved.dir.as_ref().map(|d| d.join(CONFIG_FILE));
         let mut report = LoadReport {
             dir: resolved.dir.clone(),
             rule: resolved.rule.to_string(),
@@ -133,19 +137,22 @@ impl<T: Settings> SettingsStore<T> {
             seen_mtime: None,
         };
 
-        if let Err(e) = std::fs::create_dir_all(&store.dir) {
+        let (Some(dir), Some(path)) = (store.dir.clone(), store.path.clone()) else {
+            return (store, report);
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
             store.load_best_effort(&mut report);
             store.set_read_only(&mut report, ReadOnlyReason::DirUnavailable(e));
             return (store, report);
         }
-        if let Err(e) = recovery::check_writable(&store.dir) {
+        if let Err(e) = recovery::check_writable(&dir) {
             store.load_best_effort(&mut report);
             store.set_read_only(&mut report, ReadOnlyReason::DirNotWritable(e));
             return (store, report);
         }
 
-        match std::fs::read_to_string(&store.path) {
-            Ok(text) => store.load_text(&text, &mut report),
+        match std::fs::read_to_string(&path) {
+            Ok(text) => store.load_text(&path, &text, &mut report),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 if let Some((value, from)) = migrate::import_legacy(&options.legacy) {
                     store.value = value;
@@ -158,14 +165,19 @@ impl<T: Settings> SettingsStore<T> {
         (store, report)
     }
 
-    /// The configuration folder.
-    pub fn dir(&self) -> &Path {
-        &self.dir
+    /// The configuration folder; `None` when the store is in memory only.
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
     }
 
-    /// The `config.toml` path.
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// The `config.toml` path; `None` when the store is in memory only.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// True when the store reads and writes a file; false when it is in memory only.
+    pub fn is_persistent(&self) -> bool {
+        self.path.is_some()
     }
 
     /// The current settings. In memory; cheap to call every frame.
@@ -243,14 +255,18 @@ impl<T: Settings> SettingsStore<T> {
         if let Some(why) = &self.read_only {
             return Err(SettingsError::ReadOnly(why.clone()));
         }
-        if !self.dirty && (self.written || self.path.exists()) {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        if !self.dirty && (self.written || path.exists()) {
             return Ok(());
         }
         self.save()
     }
 
     fn mark_changed(&mut self, now: Instant) {
-        self.dirty = true;
+        // An in-memory store has nothing to save, so it never becomes dirty.
+        self.dirty = self.path.is_some();
         self.last_change = Some(now);
     }
 
@@ -262,7 +278,8 @@ impl<T: Settings> SettingsStore<T> {
     /// Reads the file if it happens to be readable, so a read-only store still shows the
     /// user's values instead of defaults.
     fn load_best_effort(&mut self, report: &mut LoadReport) {
-        if let Ok(text) = std::fs::read_to_string(&self.path)
+        if let Some(path) = &self.path
+            && let Ok(text) = std::fs::read_to_string(path)
             && let Ok(mut doc) = document::parse(&text)
         {
             let upgraded = migrate::upgrade::<T>(&mut doc);
@@ -277,11 +294,11 @@ impl<T: Settings> SettingsStore<T> {
         }
     }
 
-    fn load_text(&mut self, text: &str, report: &mut LoadReport) {
+    fn load_text(&mut self, path: &Path, text: &str, report: &mut LoadReport) {
         let mut doc = match document::parse(text) {
             Ok(doc) => doc,
             Err(_) => {
-                match recovery::move_aside(&self.path) {
+                match recovery::move_aside(path) {
                     Ok(moved) => report.broken_moved_to = Some(moved),
                     Err(e) => self.set_read_only(report, ReadOnlyReason::CannotMoveAside(e)),
                 }
@@ -303,7 +320,7 @@ impl<T: Settings> SettingsStore<T> {
         let (value, errors) = document::deserialize_sections::<T>(&doc);
         self.value = value;
         self.doc = doc;
-        self.seen_mtime = mtime(&self.path);
+        self.seen_mtime = mtime(path);
         report.source = Source::File;
         report.section_errors = errors;
     }
@@ -312,16 +329,20 @@ impl<T: Settings> SettingsStore<T> {
         if let Some(why) = &self.read_only {
             return Err(SettingsError::ReadOnly(why.clone()));
         }
-        self.reload_if_changed_outside();
-        recovery::refresh_backup(&self.path)?;
+        let Some(path) = self.path.clone() else {
+            self.dirty = false;
+            return Ok(());
+        };
+        self.reload_if_changed_outside(&path);
+        recovery::refresh_backup(&path)?;
         merge_into(&mut self.doc, &self.value).map_err(|e| SettingsError::Serialize(e.to_string()))?;
         set_schema_version(&mut self.doc, T::SCHEMA_VERSION);
         let text = document::render(&self.doc);
-        craft_atomic::atomic_write_with(&self.path, |file| {
+        craft_atomic::atomic_write_with(&path, |file| {
             restrict_permissions(file)?;
             file.write_all(text.as_bytes())
         })?;
-        self.seen_mtime = mtime(&self.path);
+        self.seen_mtime = mtime(&path);
         self.dirty = false;
         self.written = true;
         self.failures = 0;
@@ -332,12 +353,12 @@ impl<T: Settings> SettingsStore<T> {
     /// Another instance or a hand edit may have changed the file since it was read. Re-read it
     /// so their comments and unknown keys survive; known keys are then overwritten by this
     /// store's values.
-    fn reload_if_changed_outside(&mut self) {
-        let current = mtime(&self.path);
+    fn reload_if_changed_outside(&mut self, path: &Path) {
+        let current = mtime(path);
         if current.is_none() || current == self.seen_mtime {
             return;
         }
-        if let Ok(text) = std::fs::read_to_string(&self.path)
+        if let Ok(text) = std::fs::read_to_string(path)
             && let Ok(mut doc) = document::parse(&text)
             && !matches!(migrate::upgrade::<T>(&mut doc), Ok(Upgrade::Newer { .. }) | Err(_))
         {

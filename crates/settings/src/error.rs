@@ -87,8 +87,8 @@ pub enum Source {
 /// What happened while opening the store. Nothing in here is fatal; the store always opens.
 #[derive(Debug)]
 pub struct LoadReport {
-    /// The configuration folder.
-    pub dir: PathBuf,
+    /// The configuration folder; `None` when nothing is read or written (isolated or in memory).
+    pub dir: Option<PathBuf>,
     /// The rule that chose `dir` (see [`crate::Rule`]), as text so the report stays `Debug`-only.
     pub rule: String,
     /// Where the values came from.

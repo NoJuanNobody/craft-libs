@@ -22,10 +22,17 @@ about or settings screen.
 
 1. An override passed by the app, such as a `--config-dir` flag
 2. `<APP>_CONFIG_DIR`, for example `PHOTOCRAFT_CONFIG_DIR` (one per app, so redirecting one
-   app does not move the others; empty counts as unset)
-3. Portable mode: a file named `portable` next to the executable (next to the `.app` on macOS,
-   since writing inside a signed bundle breaks its signature) puts settings in `config/` beside it
+   app does not move the others). Set but **empty** means isolated: nothing is read or written
+   anywhere, the same as DesignCraft's existing behaviour, so tests and agents can never touch a
+   user's real settings
+3. Portable mode: a marker file next to the executable (next to the `.app` on macOS, since
+   writing inside a signed bundle breaks its signature). The default is a file named `portable`
+   with settings in `config/` beside it; apps that already ship portable builds keep their own
+   names (PhotoCraft: `portable.txt` or `PhotoCraft.portable`, folder `PhotoCraftData`)
 4. The platform default:
+
+Apps can also open a store with `Location::Memory` (for a switch like `DESIGNCRAFT_NO_PREFS`):
+settings work in memory and nothing touches the disk.
 
 | Platform | Folder |
 |---|---|
@@ -76,8 +83,8 @@ files there too.
 
 | App | Today | Moving to `craft-settings` |
 |---|---|---|
-| PhotoCraft | `~/.config/photocraft/preferences.json` + eframe `ui.ron`; atomic saves with retries | Import `preferences.json`; keep `ui.ron` |
-| DesignCraft | `~/.config/designcraft/prefs.json` + `ui.json`; saves on exit, ignores failures | Import `prefs.json`; keep `ui.json`; gain save-during-use and error reporting |
+| PhotoCraft | `~/.config/photocraft/preferences.json` + eframe `ui.ron`; atomic saves with retries; portable via `portable.txt`/`PhotoCraft.portable` → `PhotoCraftData/` | Import `preferences.json`; keep `ui.ron`; keep its portable names via `PORTABLE_MARKERS`/`PORTABLE_DIR` |
+| DesignCraft | `~/.config/designcraft/prefs.json` + `ui.json`; saves on exit, ignores failures; empty `DESIGNCRAFT_CONFIG_DIR` and `DESIGNCRAFT_NO_PREFS` touch nothing | Import `prefs.json`; keep `ui.json`; gain save-during-use and error reporting; `DESIGNCRAFT_NO_PREFS` → `Location::Memory` |
 | EffectCraft | `~/.config/effectcraft/prefs.json`, `shortcuts.json`, `script_settings.json`; atomic | Import all three into sections of one `config.toml` |
 | FilmCraft | `~/.local/share/filmcraft/preferences.json`; atomic | Import from the data folder; settings move to the config folder |
 | GridCraft | `~/.config/gridcraft/prefs.json` + `ui.json`; saves on exit, ignores failures | Same as DesignCraft |

@@ -1,13 +1,27 @@
 //! Choosing the configuration folder.
 //!
 //! First match wins: an override from the application, the `<APP>_CONFIG_DIR` variable, a
-//! `portable` marker next to the executable, then the platform's own config folder.
+//! portable marker next to the executable, then the platform's own config folder. An empty
+//! `<APP>_CONFIG_DIR`, or [`Location::Memory`], means no folder at all: nothing is read or written.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-/// Name of the file that turns on portable mode when it sits next to the executable.
-pub const PORTABLE_MARKER: &str = "portable";
+/// How an application spells portable mode: the marker files that turn it on (any one, contents
+/// ignored) and the folder created beside the executable. Comes from [`crate::Settings`], so an
+/// app that already ships portable builds keeps its existing names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Portable {
+    /// File names next to the executable that switch portable mode on.
+    pub markers: &'static [&'static str],
+    /// Folder beside the executable that holds the settings in portable mode.
+    pub dir: &'static str,
+}
+
+impl Portable {
+    /// The suite default: a `portable` file puts settings in `config/`.
+    pub const DEFAULT: Self = Self { markers: crate::paths_default::MARKERS, dir: crate::paths_default::DIR };
+}
 
 /// Where the application wants its settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +30,8 @@ pub enum Location {
     Auto,
     /// Use this folder, no questions asked (a `--config-dir` flag, or a library folder).
     Dir(PathBuf),
+    /// Keep settings in memory only; read and write nothing (tests, demos, `<APP>_NO_PREFS`).
+    Memory,
 }
 
 /// Which rule chose the folder.
@@ -25,7 +41,11 @@ pub enum Rule {
     Override,
     /// The named environment variable.
     EnvVar(String),
-    /// A `portable` marker next to the executable.
+    /// The named environment variable was set but empty: isolated, nothing read or written.
+    Isolated(String),
+    /// [`Location::Memory`].
+    Memory,
+    /// A portable marker next to the executable.
     Portable,
     /// The platform's config folder.
     Platform,
@@ -38,6 +58,8 @@ impl std::fmt::Display for Rule {
         match self {
             Self::Override => f.write_str("override"),
             Self::EnvVar(name) => write!(f, "environment variable {name}"),
+            Self::Isolated(name) => write!(f, "{name} is empty: isolated, nothing read or written"),
+            Self::Memory => f.write_str("in memory only"),
             Self::Portable => f.write_str("portable marker"),
             Self::Platform => f.write_str("platform default"),
             Self::Fallback => f.write_str("fallback to current directory"),
@@ -48,8 +70,8 @@ impl std::fmt::Display for Rule {
 /// A chosen folder and the rule behind it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
-    /// The configuration folder.
-    pub dir: PathBuf,
+    /// The configuration folder; `None` for [`Rule::Isolated`] and [`Rule::Memory`].
+    pub dir: Option<PathBuf>,
     /// Why.
     pub rule: Rule,
 }
@@ -90,31 +112,36 @@ pub fn env_var_name(app_id: &str) -> String {
     name
 }
 
-/// Applies the rules for `app_id`.
-pub fn resolve(app_id: &str, location: &Location, probe: &Probe) -> Resolved {
-    if let Location::Dir(dir) = location {
-        return Resolved { dir: dir.clone(), rule: Rule::Override };
+/// Applies the rules for `app_id`, with the app's portable-mode names.
+pub fn resolve(app_id: &str, portable: &Portable, location: &Location, probe: &Probe) -> Resolved {
+    match location {
+        Location::Dir(dir) => return Resolved { dir: Some(dir.clone()), rule: Rule::Override },
+        Location::Memory => return Resolved { dir: None, rule: Rule::Memory },
+        Location::Auto => {}
     }
     let var = env_var_name(app_id);
-    if let Some(value) = (probe.env)(&var).filter(|v| !v.is_empty()) {
-        return Resolved { dir: PathBuf::from(value), rule: Rule::EnvVar(var) };
+    if let Some(value) = (probe.env)(&var) {
+        if value.is_empty() {
+            return Resolved { dir: None, rule: Rule::Isolated(var) };
+        }
+        return Resolved { dir: Some(PathBuf::from(value)), rule: Rule::EnvVar(var) };
     }
-    if let Some(dir) = probe.exe_dir.as_deref().and_then(portable_dir) {
-        return Resolved { dir, rule: Rule::Portable };
+    if let Some(dir) = probe.exe_dir.as_deref().and_then(|d| portable_dir(d, portable)) {
+        return Resolved { dir: Some(dir), rule: Rule::Portable };
     }
     match &probe.platform_config_dir {
-        Some(base) => Resolved { dir: base.join(app_id), rule: Rule::Platform },
-        None => Resolved { dir: PathBuf::from(".").join(app_id), rule: Rule::Fallback },
+        Some(base) => Resolved { dir: Some(base.join(app_id)), rule: Rule::Platform },
+        None => Resolved { dir: Some(PathBuf::from(".").join(app_id)), rule: Rule::Fallback },
     }
 }
 
-/// The folder a `portable` marker points at, when `exe_dir` has one.
+/// The folder a portable marker points at, when `exe_dir` has one.
 ///
 /// On macOS the executable sits in `X.app/Contents/MacOS`; the marker is looked for next to the
 /// `.app` bundle, because writing inside a signed bundle breaks its signature.
-fn portable_dir(exe_dir: &Path) -> Option<PathBuf> {
+fn portable_dir(exe_dir: &Path, portable: &Portable) -> Option<PathBuf> {
     let base = bundle_parent(exe_dir).unwrap_or(exe_dir);
-    base.join(PORTABLE_MARKER).is_file().then(|| base.join("config"))
+    portable.markers.iter().any(|m| base.join(m).is_file()).then(|| base.join(portable.dir))
 }
 
 fn bundle_parent(exe_dir: &Path) -> Option<&Path> {

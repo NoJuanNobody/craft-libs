@@ -49,13 +49,19 @@ pub mod store;
 pub use error::{LoadReport, MigrateError, ReadOnlyReason, SaveStatus, SectionError, SettingsError, Source, TickResult};
 pub use migrate::LegacyFile;
 #[cfg(not(target_arch = "wasm32"))]
-pub use paths::{Location, Probe, Resolved, Rule};
+pub use paths::{Location, Portable, Probe, Resolved, Rule};
 #[cfg(not(target_arch = "wasm32"))]
 pub use store::{OpenOptions, SettingsStore};
 pub use toml_edit::DocumentMut;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+
+/// Suite-default portable names, kept here so the trait also compiles on wasm.
+mod paths_default {
+    pub const MARKERS: &[&str] = &["portable"];
+    pub const DIR: &str = "config";
+}
 
 /// An application's settings type.
 ///
@@ -68,6 +74,13 @@ pub trait Settings: Serialize + DeserializeOwned + Default + Clone + PartialEq {
 
     /// Version written as `schema_version` at the top of `config.toml`.
     const SCHEMA_VERSION: u32;
+
+    /// File names next to the executable that turn on portable mode (any one; contents ignored).
+    /// Override to keep an existing portable layout, e.g. `&["portable.txt", "PhotoCraft.portable"]`.
+    const PORTABLE_MARKERS: &'static [&'static str] = paths_default::MARKERS;
+
+    /// Folder beside the executable that holds settings in portable mode.
+    const PORTABLE_DIR: &'static str = paths_default::DIR;
 
     /// Upgrade a document from `from` to `from + 1`. Called once per step for files whose
     /// `schema_version` is older than [`Settings::SCHEMA_VERSION`], before typed parsing.
